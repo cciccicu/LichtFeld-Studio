@@ -1,0 +1,200 @@
+name: LichtFeld Studio v0.5.3 - Windows Portable
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\..\vcpkg
+      VCPKG_BUILD_TYPE: release
+
+    steps:
+      - name: Checkout v0.5.3
+        uses: actions/checkout@v4
+        with:
+          ref: v0.5.3
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install CUDA 12.8
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          cd ..
+
+          Invoke-WebRequest `
+            https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe `
+            -OutFile cuda.exe `
+            -Verbose
+
+          Start-Process `
+            -FilePath .\cuda.exe `
+            -ArgumentList "-y -s -accepteula -toolkit -override -noDisplayDriver" `
+            -Wait
+
+      - name: Set CUDA environment
+        shell: pwsh
+        run: |
+          "CUDA_PATH_V12_8=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin" |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+          "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\libnvvp" |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Cache vcpkg tool
+        id: cache-vcpkg-tool
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_ROOT }}
+          key: vcpkg-tool-${{ runner.os }}-2026-03-12
+          restore-keys: |
+            vcpkg-tool-${{ runner.os }}-
+
+      - name: Setup vcpkg
+        if: steps.cache-vcpkg-tool.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          cd ..
+
+          git clone https://github.com/microsoft/vcpkg.git
+
+          .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Cache vcpkg installed dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/vcpkg_installed
+          key: vcpkg-installed-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-installed-${{ runner.os }}-
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $cmakeArgs = '-B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PORTABLE=ON -DBUILD_PYTHON_STUBS=OFF'
+
+          $retryablePatterns = @(
+            'status code 5\d\d',
+            'timed out',
+            'timeout',
+            'connection reset',
+            'failed to connect',
+            'temporarily unavailable',
+            'tls',
+            'ssl'
+          )
+
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Write-Host "Configure attempt $attempt/3"
+
+            cmd /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake $cmakeArgs"
+
+            if ($LASTEXITCODE -eq 0) {
+              exit 0
+            }
+
+            $shouldRetry = $false
+
+            if (Test-Path 'build\vcpkg-manifest-install.log') {
+              foreach ($pattern in $retryablePatterns) {
+                if (Select-String `
+                    -Path 'build\vcpkg-manifest-install.log' `
+                    -Pattern $pattern `
+                    -Quiet) {
+                  $shouldRetry = $true
+                  break
+                }
+              }
+            }
+
+            if (-not $shouldRetry -or $attempt -eq 3) {
+              exit $LASTEXITCODE
+            }
+
+            Write-Warning "Retryable configure failure detected. Cleaning build tree before retry."
+
+            if (Test-Path 'build') {
+              Remove-Item -Recurse -Force 'build'
+            }
+
+            Start-Sleep -Seconds (15 * $attempt)
+          }
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+
+          cmake --build build -j %NUMBER_OF_PROCESSORS%
+
+      - name: Dump failure diagnostics
+        if: failure()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+
+          $paths = @(
+            'build\vcpkg-manifest-install.log',
+            'build\vcpkg_installed\vcpkg\issue_body.md',
+            'build\CMakeFiles\CMakeConfigureLog.yaml',
+            'build\CMakeFiles\CMakeError.log',
+            'build\CMakeFiles\CMakeOutput.log',
+            'build\CMakeCache.txt'
+          )
+
+          foreach ($path in $paths) {
+            if (Test-Path $path) {
+              Write-Host "::group::$path"
+              Get-Content $path -Tail 400
+              Write-Host "::endgroup::"
+            }
+          }
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-v053-diagnostics-${{ github.run_number }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            build/CMakeCache.txt
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/CMakeFiles/CMakeError.log
+            build/CMakeFiles/CMakeOutput.log
+            build/vcpkg-manifest-install.log
+            build/vcpkg_installed/vcpkg/issue_body.md
+            build/vcpkg_installed/vcpkg/blds/**/*.log
+
+      - name: Package Portable build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          cmake --install build --prefix dist
+
+          Compress-Archive `
+            -Path dist\* `
+            -DestinationPath LichtFeld-Studio-windows-v0.5.3-portable.zip
+
+      - name: Upload Portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: LichtFeld-Studio-windows-v0.5.3-portable
+          path: LichtFeld-Studio-windows-v0.5.3-portable.zip
+          if-no-files-found: error
+          retention-days: 7
