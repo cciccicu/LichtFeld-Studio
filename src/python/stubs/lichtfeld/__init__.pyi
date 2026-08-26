@@ -257,6 +257,17 @@ def pause_training() -> None:
 def resume_training() -> None:
     """Resume a paused training run"""
 
+def project_training_session_state() -> dict:
+    """Return the stored training-session restore state for the open project"""
+
+def restore_training_session(then_start: bool = False) -> None:
+    """Hydrate the stored training session on demand"""
+
+def training_get_state() -> dict:
+    """
+    Return the live trainer state, or the stored session when the trainer is not hydrated
+    """
+
 def stop_training() -> None:
     """Stop the current training run"""
 
@@ -275,7 +286,10 @@ def project_save(wait: bool = False, regenerate_preview: bool = True) -> bool:
 def project_save_as(path: str = '', wait: bool = False) -> bool:
     """Save the active project to a new .licht path"""
 
-def project_open(path: str = '', discard_changes: bool = False, stop_training: bool = False) -> ProjectOpenOutcome:
+def project_poll_write() -> dict:
+    """Return the active .licht project write state"""
+
+def project_open(path: str = '', discard_changes: bool = False, stop_training: bool = False, keep_asset_manager_open: bool = False) -> ProjectOpenOutcome:
     """Open a .licht project"""
 
 def project_compact() -> None:
@@ -2053,6 +2067,56 @@ class OptimizationParams:
 
     @enable_eval.setter
     def enable_eval(self, arg: bool, /) -> None: ...
+
+    @property
+    def background_improvements(self) -> bool:
+        """
+        Improve distant background reconstruction (MRNF): far-field seeding and splits, decay relief, growth cap, per-splat position steps, visibility-ratio growth ranking, paced capacity fill
+        """
+
+    @background_improvements.setter
+    def background_improvements(self, arg: bool, /) -> None: ...
+
+    @property
+    def far_scene_min_fraction(self) -> float:
+        """
+        Minimum deep-far splat fraction that activates far-field features (0 = always on)
+        """
+
+    @far_scene_min_fraction.setter
+    def far_scene_min_fraction(self, arg: float, /) -> None: ...
+
+    @property
+    def growth_ratio_rank(self) -> bool:
+        """
+        Rank MRNF growth by visibility-normalized error (err/vis^p) instead of raw window error
+        """
+
+    @growth_ratio_rank.setter
+    def growth_ratio_rank(self, arg: bool, /) -> None: ...
+
+    @property
+    def growth_ratio_pow(self) -> float:
+        """Visibility exponent p for the err/vis^p growth rank"""
+
+    @growth_ratio_pow.setter
+    def growth_ratio_pow(self, arg: float, /) -> None: ...
+
+    @property
+    def fill_pacing_iter(self) -> int:
+        """Pace MRNF cap fill until this iteration (0 = fill as fast as possible)"""
+
+    @fill_pacing_iter.setter
+    def fill_pacing_iter(self, arg: int, /) -> None: ...
+
+    @property
+    def far_seed_dose(self) -> int:
+        """
+        Far-field seeds injected per refine window (0 = starvation-scaled default)
+        """
+
+    @far_seed_dose.setter
+    def far_seed_dose(self, arg: int, /) -> None: ...
 
     @property
     def steps_scaler(self) -> float:

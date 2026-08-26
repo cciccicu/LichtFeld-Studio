@@ -87,6 +87,7 @@ BOOL_PROPS = (
     "ppisp_freeze_gaussians",
     "random",
     "enable_eval",
+    "background_improvements",
 )
 
 SELECT_PROPS = ("mask_mode", "bg_mode", "normal_loss_space")
@@ -126,6 +127,7 @@ def _run(
 
 BASIC_RUNS = (
     _run("basic_struct", "iterations", "max_cap"),
+    _run("basic_background", "background_improvements", visibility_condition_id="dep_mrnf"),
     _run(
         "basic_live_start",
         "use_bilateral_grid",
@@ -750,10 +752,12 @@ class SectionBinding:
         if row is None:
             return False
         if row["kind"] == "checkbox":
-            if isinstance(value, str):
-                value = value.strip().lower() in {"1", "true", "yes", "on"}
-            else:
-                value = bool(value)
+            # Only the click binding produces booleans. String payloads are
+            # creation-time change echoes from the row template's data-if'd
+            # select element carrying this row's id; committing them corrupts
+            # the parameter (e.g. normal_auto_generate flipped off at startup).
+            if not isinstance(value, bool):
+                return False
         elif row["kind"] == "select":
             try:
                 value = int(value)

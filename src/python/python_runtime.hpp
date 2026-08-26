@@ -558,11 +558,6 @@ namespace lfs::python {
     LFS_PYTHON_RUNTIME_API void set_scene_manager(vis::SceneManager* sm);
     LFS_PYTHON_RUNTIME_API vis::SceneManager* get_scene_manager();
 
-    // Asset Manager save callback
-    using SaveAssetCallback = void (*)(const char* node_name);
-    LFS_PYTHON_RUNTIME_API void set_save_asset_callback(SaveAssetCallback save_cb);
-    LFS_PYTHON_RUNTIME_API void invoke_save_asset(const std::string& node_name);
-
     LFS_PYTHON_RUNTIME_API void set_selection_service(vis::SelectionService* ss);
     LFS_PYTHON_RUNTIME_API vis::SelectionService* get_selection_service();
 
@@ -789,12 +784,17 @@ namespace lfs::python {
                                                    void* overlay_renderer,
                                                    void* draw_list);
 
+    using ViewportOverlayDocumentUnloadCallback = void (*)();
+
     LFS_PYTHON_RUNTIME_API void set_viewport_overlay_callbacks(HasViewportDrawHandlersCallback has_cb,
                                                                InvokeViewportOverlayCallback invoke_cb);
     LFS_PYTHON_RUNTIME_API void set_viewport_overlay_document_sync_callback(
         SyncViewportOverlayDocumentCallback sync_cb);
+    LFS_PYTHON_RUNTIME_API void set_viewport_overlay_document_unload_callback(
+        ViewportOverlayDocumentUnloadCallback unload_cb);
     LFS_PYTHON_RUNTIME_API bool has_viewport_draw_handlers();
     LFS_PYTHON_RUNTIME_API bool sync_viewport_overlay_document(void* document);
+    LFS_PYTHON_RUNTIME_API void notify_viewport_overlay_document_unloaded();
     LFS_PYTHON_RUNTIME_API void invoke_viewport_overlay(const float* view_matrix, const float* proj_matrix,
                                                         const float* vp_pos, const float* vp_size,
                                                         const float* cam_pos, const float* cam_fwd,

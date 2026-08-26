@@ -19,6 +19,7 @@
 #include "lfs/training/sh_value_storage.hpp"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cuda_runtime.h>
 #include <optional>
@@ -178,6 +179,25 @@ namespace lfs::training {
         cropbox_lr_scale_ = scale;
     }
 
+    void AdamOptimizer::set_per_splat_mean_step(const bool enabled,
+                                                const float median_extent,
+                                                const float r_min,
+                                                const float r_max) {
+        per_splat_mean_step_ = enabled;
+        mean_step_median_extent_ = median_extent;
+        mean_step_r_min_ = r_min;
+        mean_step_r_max_ = r_max;
+        if (!enabled) {
+            mean_step_far_mask_ = nullptr;
+            mean_step_far_mask_n_ = 0;
+        }
+    }
+
+    void AdamOptimizer::set_mean_step_far_mask(const bool* mask, const int n) {
+        mean_step_far_mask_ = mask;
+        mean_step_far_mask_n_ = mask != nullptr ? n : 0;
+    }
+
     void AdamOptimizer::step(const int iteration) {
         LFS_TRACE("kernel.adam.step");
         if (fused_step_iteration_ == iteration) {
@@ -189,6 +209,8 @@ namespace lfs::training {
         fast_lfs::optimizer::JointContiguousBatchEntry entries[5];
         int n_entries = 0;
         cudaStream_t batch_stream = nullptr;
+        const float* batch_mean_step_scale_raw = nullptr;
+        int batch_mean_step_scale_n = 0;
         const ParamType contiguous[] = {
             ParamType::Means, ParamType::Sh0, ParamType::Scaling,
             ParamType::Rotation, ParamType::Opacity};
@@ -244,6 +266,15 @@ namespace lfs::training {
             e.lr = param_lr;
             e.bias_correction1_rcp = static_cast<float>(bias_correction1_rcp);
             e.bias_correction2_sqrt_rcp = static_cast<float>(bias_correction2_sqrt_rcp);
+            if (type == ParamType::Means && per_splat_mean_step_) {
+                auto& scaling = splat_data_.scaling_raw();
+                if (scaling.is_valid() && scaling.numel() > 0) {
+                    lfs::core::waitForCUDAStream(batch_stream, scaling.stream());
+                    batch_mean_step_scale_raw = scaling.ptr<float>();
+                    batch_mean_step_scale_n = static_cast<int>(scaling.numel());
+                    e.apply_mean_step = 1;
+                }
+            }
             param_live.set_stream(batch_stream);
             state.exp_avg.set_stream(batch_stream);
             state.joint_bounds.set_stream(batch_stream);
@@ -267,7 +298,10 @@ namespace lfs::training {
                 static_cast<float>(config_.beta1),
                 static_cast<float>(config_.beta2),
                 static_cast<float>(config_.eps),
-                batch_stream);
+                batch_stream,
+                batch_mean_step_scale_raw, batch_mean_step_scale_n,
+                mean_step_median_extent_, mean_step_r_min_, mean_step_r_max_,
+                mean_step_far_mask_, mean_step_far_mask_n_);
         }
         step_param(ParamType::ShN, iteration);
     }
@@ -707,6 +741,16 @@ namespace lfs::training {
                 throw std::runtime_error("Optimizer state desync: " + name);
             }
             const size_t feature_dim = param_live.numel() / param_size;
+            const float* mean_step_scale_raw = nullptr;
+            int mean_step_scale_n = 0;
+            if (type == ParamType::Means && per_splat_mean_step_) {
+                auto& scaling = splat_data_.scaling_raw();
+                if (scaling.is_valid() && scaling.numel() > 0) {
+                    lfs::core::waitForCUDAStream(execution_stream, scaling.stream());
+                    mean_step_scale_raw = scaling.ptr<float>();
+                    mean_step_scale_n = static_cast<int>(scaling.numel());
+                }
+            }
             fast_lfs::optimizer::adam_step_joint_contiguous_raw(
                 param_live.ptr<float>(),
                 state.exp_avg.ptr<uint8_t>(),
@@ -727,7 +771,14 @@ namespace lfs::training {
                 static_cast<float>(config_.eps),
                 static_cast<float>(bias_correction1_rcp),
                 static_cast<float>(bias_correction2_sqrt_rcp),
-                execution_stream);
+                execution_stream,
+                mean_step_scale_raw,
+                mean_step_scale_n,
+                mean_step_median_extent_,
+                mean_step_r_min_,
+                mean_step_r_max_,
+                mean_step_far_mask_,
+                mean_step_far_mask_n_);
             param_live.set_stream(execution_stream);
             state.exp_avg.set_stream(execution_stream);
             state.joint_bounds.set_stream(execution_stream);
@@ -950,6 +1001,12 @@ namespace lfs::training {
         fused.scaling = prepare_param(ParamType::Scaling, 3, true);
         fused.rotation = prepare_param(ParamType::Rotation, 4, true);
         fused.opacity = prepare_param(ParamType::Opacity, 1, true);
+        fused.per_splat_mean_step = per_splat_mean_step_;
+        fused.mean_step_median_extent = mean_step_median_extent_;
+        fused.mean_step_r_min = mean_step_r_min_;
+        fused.mean_step_r_max = mean_step_r_max_;
+        fused.mean_step_far_mask = mean_step_far_mask_;
+        fused.mean_step_far_mask_n = mean_step_far_mask_n_;
 
         fused.enabled = fused.means.enabled || fused.sh0.enabled || fused.shN.enabled ||
                         fused.scaling.enabled || fused.rotation.enabled || fused.opacity.enabled;
@@ -1728,6 +1785,7 @@ namespace lfs::training {
     }
 
     void AdamOptimizer::deserialize(std::istream& is) {
+        const auto deserialize_started = std::chrono::steady_clock::now();
         uint32_t magic = 0, version = 0;
         lfs::core::serialization_detail::read_exact(is, &magic, sizeof(magic), "Adam magic");
         lfs::core::serialization_detail::read_exact(is, &version, sizeof(version), "Adam version");
@@ -1894,8 +1952,6 @@ namespace lfs::training {
                         throw std::runtime_error("Invalid AdamOptimizer checkpoint: joint packed shape mismatch");
                     }
                 }
-                state.exp_avg = state.exp_avg.cuda();
-                state.joint_bounds = state.joint_bounds.cuda();
             }
 
             // Serialized capacity is advisory and may be attacker-controlled.
@@ -1906,10 +1962,44 @@ namespace lfs::training {
             loaded_states.emplace(std::move(name), std::move(state));
         }
 
+        const auto cpu_decode_finished = std::chrono::steady_clock::now();
+        // Tensor::to(CUDA, stream) rehomes onto that handle; do not destroy it.
+        cudaStream_t upload_stream = lfs::core::getCurrentCUDAStream();
+        for (auto& [state_name, state] : loaded_states) {
+            (void)state_name;
+            auto upload = [&](lfs::core::Tensor& tensor) {
+                if (!tensor.is_valid() ||
+                    tensor.device() == lfs::core::Device::CUDA) {
+                    return;
+                }
+                if (upload_stream != nullptr) {
+                    tensor = tensor.to(lfs::core::Device::CUDA, upload_stream);
+                    return;
+                }
+                tensor = tensor.to(lfs::core::Device::CUDA);
+                upload_stream = tensor.stream();
+            };
+            upload(state.exp_avg);
+            upload(state.joint_bounds);
+        }
+        if (upload_stream != nullptr) {
+            LFS_CUDA_CHECK(cudaStreamSynchronize(upload_stream));
+        }
+        const auto gpu_upload_finished = std::chrono::steady_clock::now();
+
         config_ = std::move(loaded_config);
         states_ = std::move(loaded_states);
 
         // Gradient buffers are transient and allocated lazily by get_grad().
+        const auto milliseconds = [](const auto begin, const auto end) {
+            return std::chrono::duration<double, std::milli>(end - begin).count();
+        };
+        LOG_DEBUG(
+            "Adam deserialize stages: states={} cpu_decode={:.3f} ms gpu_upload={:.3f} ms total={:.3f} ms",
+            num_states,
+            milliseconds(deserialize_started, cpu_decode_finished),
+            milliseconds(cpu_decode_finished, gpu_upload_finished),
+            milliseconds(deserialize_started, gpu_upload_finished));
         LOG_DEBUG("Deserialized AdamOptimizer: {} states", num_states);
     }
 

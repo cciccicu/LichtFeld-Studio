@@ -97,9 +97,6 @@ namespace lfs::python {
         GetMultiTransformModeCallback g_get_multi_transform_mode_cb = nullptr;
         SetMultiTransformModeCallback g_set_multi_transform_mode_cb = nullptr;
 
-        // Asset Manager save callback
-        SaveAssetCallback g_save_asset_cb = nullptr;
-
         // Thumbnail callbacks
         RequestThumbnailCallback g_request_thumbnail_cb = nullptr;
         ProcessThumbnailsCallback g_process_thumbnails_cb = nullptr;
@@ -110,6 +107,7 @@ namespace lfs::python {
         HasViewportDrawHandlersCallback g_has_viewport_draw_handlers_cb = nullptr;
         InvokeViewportOverlayCallback g_invoke_viewport_overlay_cb = nullptr;
         SyncViewportOverlayDocumentCallback g_sync_viewport_overlay_document_cb = nullptr;
+        ViewportOverlayDocumentUnloadCallback g_viewport_overlay_document_unload_cb = nullptr;
 
         // Selection sub-mode (shared between C++ toolbar and Python operator)
         std::atomic<int> g_selection_submode{0};
@@ -644,15 +642,6 @@ namespace lfs::python {
     void set_multi_transform_mode(int mode) {
         if (g_set_multi_transform_mode_cb)
             g_set_multi_transform_mode_cb(mode);
-    }
-
-    void set_save_asset_callback(SaveAssetCallback save_cb) {
-        g_save_asset_cb = save_cb;
-    }
-
-    void invoke_save_asset(const std::string& node_name) {
-        if (g_save_asset_cb)
-            g_save_asset_cb(node_name.c_str());
     }
 
     void set_scene_manager(vis::SceneManager* sm) { g_scene_manager.store(sm); }
@@ -1546,6 +1535,11 @@ namespace lfs::python {
         g_sync_viewport_overlay_document_cb = sync_cb;
     }
 
+    void set_viewport_overlay_document_unload_callback(
+        ViewportOverlayDocumentUnloadCallback unload_cb) {
+        g_viewport_overlay_document_unload_cb = unload_cb;
+    }
+
     bool has_viewport_draw_handlers() {
         return g_has_viewport_draw_handlers_cb && g_has_viewport_draw_handlers_cb();
     }
@@ -1553,6 +1547,11 @@ namespace lfs::python {
     bool sync_viewport_overlay_document(void* document) {
         return document && g_sync_viewport_overlay_document_cb &&
                g_sync_viewport_overlay_document_cb(document);
+    }
+
+    void notify_viewport_overlay_document_unloaded() {
+        if (g_viewport_overlay_document_unload_cb)
+            g_viewport_overlay_document_unload_cb();
     }
 
     void invoke_viewport_overlay(const float* view_matrix, const float* proj_matrix,

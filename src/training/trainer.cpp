@@ -2815,6 +2815,25 @@ namespace lfs::training {
                         "Scene has no cameras with image files available for training");
                 }
 
+                if (params.overrides.has_dataset_key("test_every") ||
+                    params.overrides.has_optimization_key("enable_eval")) {
+                    std::sort(
+                        source_cameras.begin(), source_cameras.end(),
+                        [](const auto& lhs, const auto& rhs) {
+                            return lhs->uid() < rhs->uid();
+                        });
+                    const bool enable_eval = params.optimization.enable_eval;
+                    const int test_every = std::max(1, params.dataset.test_every);
+                    for (size_t i = 0; i < source_cameras.size(); ++i) {
+                        const bool is_val =
+                            enable_eval &&
+                            (i % static_cast<size_t>(test_every)) == 0;
+                        source_cameras[i]->set_split(
+                            is_val ? lfs::core::CameraSplit::Eval
+                                   : lfs::core::CameraSplit::Train);
+                    }
+                }
+
                 if (params.optimization.enable_eval) {
                     for (const auto& camera : source_cameras) {
                         switch (camera->split()) {
@@ -4917,6 +4936,30 @@ namespace lfs::training {
                             return std::move(staged)
                                 .error();
                         }
+                        if (const auto first =
+                                lfs::io::project::
+                                    first_dataset_image(
+                                        chapters
+                                            ->parameters
+                                            .dataset)) {
+                            auto encoded =
+                                lfs::io::project::
+                                    dataset_preview_png(
+                                        *first);
+                            if (encoded) {
+                                LOG_INFO(
+                                    "Embedded dataset image as project preview: {}",
+                                    lfs::core::path_to_utf8(
+                                        *first));
+                                preview_png =
+                                    std::move(*encoded);
+                            } else {
+                                LOG_WARN(
+                                    "Could not encode dataset image as project preview: {}",
+                                    lfs::format_for_developer(
+                                        encoded.error()));
+                            }
+                        }
 
                         const auto wallclock_ns =
                             static_cast<std::uint64_t>(
@@ -5958,7 +6001,9 @@ namespace lfs::training {
                     auto& model = strategy_->get_model();
                     if (run_fastgs_gaussian_backward) {
                         fused_extra_gradients.scale_reg_weight = params_.optimization.scale_reg;
-                        fused_extra_gradients.opacity_reg_weight = params_.optimization.opacity_reg;
+                        // Fused path shares the configured opacity_reg weight between gradient and loss accumulation.
+                        fused_extra_gradients.opacity_reg_weight =
+                            params_.optimization.opacity_reg;
                         if (normal_supervision_started) {
                             fused_extra_gradients.flatten_reg_weight = params_.optimization.normal_flatten_weight;
                         }
@@ -7159,6 +7204,9 @@ namespace lfs::training {
                     }
 
                     nvtxRangePop(); // End rasterize
+                    if (strategy_ && !in_sparsification) {
+                        strategy_->post_render(iter, r_output);
+                    }
                 }
 
                 if (tiles_processed == 0) {
@@ -7221,7 +7269,8 @@ namespace lfs::training {
                         if (fastgs_path) {
                             loss_tensor_gpu = loss_tensor_gpu + fused_opacity_reg_loss_gpu;
                         } else {
-                            auto opacity_loss_result = compute_opacity_reg_loss(strategy_->get_model(), strategy_->get_optimizer(), params_.optimization);
+                            auto opacity_loss_result = compute_opacity_reg_loss(
+                                strategy_->get_model(), strategy_->get_optimizer(), params_.optimization);
                             if (!opacity_loss_result) {
                                 return lfs::from_legacy_expected<StepDisposition>(
                                            std::unexpected(opacity_loss_result.error()),
@@ -7939,6 +7988,11 @@ namespace lfs::training {
                 params_.optimization.normal_loss_weight > 0.0f;
             if (aux_pipeline_config.load_normals) {
                 ensure_training_normal_maps(params_, train_dataset_->get_cameras());
+                if (val_dataset_) {
+                    // Scene-path val cameras are a separate list, so generate
+                    // their missing maps too for the eval normal metric.
+                    ensure_training_normal_maps(params_, val_dataset_->get_cameras());
+                }
                 normal_prior_flip_yz_ = false;
                 normal_prior_world_space_ = false;
                 normal_prior_srgb_ = false;
@@ -8740,7 +8794,8 @@ namespace lfs::training {
     CheckpointLoadResult Trainer::load_checkpoint(
         std::istream& source,
         const std::uint64_t source_bytes,
-        const std::string_view source_name) {
+        const std::string_view source_name,
+        lfs::core::SplatData* preloaded_model) {
         if (!strategy_) {
             return std::unexpected("Cannot load checkpoint: no strategy initialized");
         }
@@ -8807,7 +8862,7 @@ namespace lfs::training {
             bilateral_grid_.get(), ppisp_.get(),
             ppisp_controller_pool_.get(),
             dynamic_cast<ADMMSparsityOptimizer*>(sparsity_optimizer_.get()),
-            splat_tensor_allocator_, source_name);
+            splat_tensor_allocator_, source_name, preloaded_model);
         if (!result) {
             return result;
         }
