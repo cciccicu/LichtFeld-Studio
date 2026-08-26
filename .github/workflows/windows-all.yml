@@ -1,0 +1,116 @@
+name: Windows CUDA Source Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\..\vcpkg
+      VCPKG_BUILD_TYPE: release
+      CUDA_PATH: C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8
+      BUILD_DIR: b
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install CUDA 12.8
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location ..
+          Invoke-WebRequest `
+            'https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe' `
+            -OutFile cuda.exe
+          Start-Process .\cuda.exe `
+            -ArgumentList '-y -s -accepteula -toolkit -override -noDisplayDriver' `
+            -Wait
+
+      - name: Set CUDA environment
+        shell: pwsh
+        run: |
+          'CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8' | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          'CUDA_PATH_V12_8=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8' | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin' | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+          'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\libnvvp' | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Cache vcpkg tool
+        id: cache-vcpkg-tool
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_ROOT }}
+          key: vcpkg-tool-${{ runner.os }}-2026-02-21
+          restore-keys: vcpkg-tool-${{ runner.os }}-
+
+      - name: Setup vcpkg
+        if: steps.cache-vcpkg-tool.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location ..
+          git clone https://github.com/microsoft/vcpkg.git
+          .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Cache vcpkg dependencies
+        uses: actions/cache@v4
+        with:
+          path: b/vcpkg_installed
+          key: vcpkg-installed-${{ runner.os }}-source-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', '.github/overlays/**') }}
+          restore-keys: vcpkg-installed-${{ runner.os }}-source-
+
+      - name: Configure
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cmake -B %BUILD_DIR% -S . -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DLFS_FAST_COMPILE=ON ^
+            -DBUILD_FORMAT_TESTS=ON ^
+            -DBUILD_PYTHON_STUBS=OFF ^
+            -DLFS_DEV_IMPORT_SOURCE_PYTHON=OFF ^
+            -DLFS_DEV_IMPORT_SOURCE_RESOURCES=OFF ^
+            -DLFS_ENABLE_CUDA_DEVICE_DEBUG=OFF
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PATH=%CD%\%BUILD_DIR%;%CD%\%BUILD_DIR%\vcpkg_installed\x64-windows\bin;%PATH%
+          cmake --build %BUILD_DIR% -j %NUMBER_OF_PROCESSORS%
+
+      - name: Run CPU format tests
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cmake --build %BUILD_DIR% --target lichtfeld_format_tests -j %NUMBER_OF_PROCESSORS%
+          ctest --test-dir %BUILD_DIR% --output-on-failure -R "^lichtfeld_format_tests$"
+
+      - name: Verify runtime files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem $env:BUILD_DIR -Recurse -Filter 'LichtFeld-Studio.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'LichtFeld-Studio.exe was not found' }
+          Write-Host "Executable: $($exe.FullName)"
+          $nvjpeg = Get-ChildItem $env:BUILD_DIR -Recurse -Filter 'nvjpeg_ext*.dll' -ErrorAction SilentlyContinue
+          if (-not $nvjpeg) { throw 'nvjpeg extension DLL was not found' }
+          $nvjpeg | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+
+      - name: Upload uninstalled build directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: LichtFeld-Studio-windows-source-build
+          path: b
+          if-no-files-found: error
+          retention-days: 7
